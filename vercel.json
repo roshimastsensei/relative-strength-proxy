@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/api/market_chart",
+      "methods": ["GET"],
+      "dest": "api/market_chart.ts"
+    }
+  ]
+}
