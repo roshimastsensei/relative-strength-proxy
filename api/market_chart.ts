@@ -1,77 +1,66 @@
 // api/market_chart.ts
 
-import { NextRequest, NextResponse } from 'next/server';
+export const config = {
+  runtime: 'edge',
+};
 
-export const dynamic = 'force-dynamic';
-
-function formatDateToDDMMYYYY(date: Date): string {
-  const day = String(date.getUTCDate()).padStart(2, '0');
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const year = date.getUTCFullYear();
-  return `${day}-${month}-${year}`;
+function parseDateToYYYYMMDD(date: Date): string {
+  return date.toISOString().split('T')[0];
 }
 
-export async function GET(req: NextRequest): Promise<NextResponse> {
-  const { searchParams } = new URL(req.url);
-  const id = searchParams.get('id');
-  const benchmark = searchParams.get('benchmark');
-  const days = parseInt(searchParams.get('days') || '7');
-
-  if (!id || !benchmark || isNaN(days)) {
-    return NextResponse.json({ error: 'Missing or invalid parameters' }, { status: 400 });
-  }
-
+async function fetchPrice(id: string, date?: string): Promise<number | null> {
   try {
-    // 1. Fetch Pₜ for token and benchmark
-    const priceNowRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`);
-    if (!priceNowRes.ok) throw new Error(`Failed to fetch current prices: ${priceNowRes.status}`);
-    const priceNow = await priceNowRes.json();
+    const url = date
+      ? `https://api.coingecko.com/api/v3/coins/${id}/history?date=${date}`
+      : `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`;
 
-    const tokenNow = priceNow[id]?.usd;
-    const benchmarkNow = priceNow[benchmark]?.usd;
+    const res = await fetch(url);
+    if (!res.ok) return null;
 
-    if (typeof tokenNow !== 'number' || typeof benchmarkNow !== 'number') {
-      return NextResponse.json({ error: 'Invalid ID(s)' }, { status: 400 });
+    const data = await res.json();
+    return date ? data?.market_data?.current_price?.usd ?? null : data?.[id]?.usd ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export default async function handler(req: Request): Promise<Response> {
+  try {
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get('id');
+    const days = parseInt(searchParams.get('days') || '7', 10);
+    const benchmark = searchParams.get('benchmark');
+
+    if (!id || !benchmark || isNaN(days)) {
+      return new Response(JSON.stringify({ error: 'Missing parameters' }), { status: 400 });
     }
 
-    // 2. Compute target date (Pₜ₋ₙ)
-    const pastDate = new Date();
-    pastDate.setUTCDate(pastDate.getUTCDate() - days);
-    const dateStr = formatDateToDDMMYYYY(pastDate);
+    const now = new Date();
+    const past = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+    const pastDate = past.toLocaleDateString('en-GB').split('/').reverse().join('-'); // dd-mm-yyyy
 
-    // 3. Fetch Pₜ₋ₙ for token and benchmark
-    const [tokenHistRes, benchmarkHistRes] = await Promise.all([
-      fetch(`https://api.coingecko.com/api/v3/coins/${id}/history?date=${dateStr}`),
-      fetch(`https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${dateStr}`),
-    ]);
+    const tokenNow = await fetchPrice(id);
+    const tokenPast = await fetchPrice(id, pastDate);
 
-    if (!tokenHistRes.ok || !benchmarkHistRes.ok) {
-      return NextResponse.json({ error: 'History fetch failed' }, { status: 500 });
+    const benchNow = await fetchPrice(benchmark);
+    const benchPast = await fetchPrice(benchmark, pastDate);
+
+    if ([tokenNow, tokenPast, benchNow, benchPast].some(p => p === null || p === 0)) {
+      return new Response(JSON.stringify({ error: 'Missing or zero price' }), { status: 500 });
     }
 
-    const tokenHist = await tokenHistRes.json();
-    const benchmarkHist = await benchmarkHistRes.json();
+    const tokenPerf = (tokenNow! - tokenPast!) / tokenPast!;
+    const benchPerf = (benchNow! - benchPast!) / benchPast!;
 
-    const tokenPast = tokenHist?.market_data?.current_price?.usd;
-    const benchmarkPast = benchmarkHist?.market_data?.current_price?.usd;
+    const relativeStrength = tokenPerf / benchPerf;
 
-    if (typeof tokenPast !== 'number' || typeof benchmarkPast !== 'number') {
-      return NextResponse.json({ error: 'Missing historical data' }, { status: 500 });
-    }
-
-    // 4. Compute performances
-    const perfToken = (tokenNow - tokenPast) / tokenPast;
-    const perfBenchmark = (benchmarkNow - benchmarkPast) / benchmarkPast;
-
-    // 5. Relative strength
-    const relativeStrength = perfBenchmark === 0 ? null : perfToken / perfBenchmark;
-
-    return NextResponse.json({
-      relativeStrength,
-      perfToken,
-      perfBenchmark,
+    return new Response(JSON.stringify({ relativeStrength }), {
+      headers: { 'Content-Type': 'application/json' },
     });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: 'Unexpected server error', details: err.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 }
