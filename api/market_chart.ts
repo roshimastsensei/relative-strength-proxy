@@ -1,66 +1,56 @@
-// api/market_chart.ts
+import type { NextApiRequest, NextApiResponse } from 'next'
 
-export const config = {
-  runtime: 'edge',
-};
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const { id, days, benchmark } = req.query
 
-function parseDateToYYYYMMDD(date: Date): string {
-  return date.toISOString().split('T')[0];
-}
-
-async function fetchPrice(id: string, date?: string): Promise<number | null> {
-  try {
-    const url = date
-      ? `https://api.coingecko.com/api/v3/coins/${id}/history?date=${date}`
-      : `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`;
-
-    const res = await fetch(url);
-    if (!res.ok) return null;
-
-    const data = await res.json();
-    return date ? data?.market_data?.current_price?.usd ?? null : data?.[id]?.usd ?? null;
-  } catch {
-    return null;
+  if (typeof id !== 'string' || typeof days !== 'string' || typeof benchmark !== 'string') {
+    return res.status(400).json({ error: 'Invalid parameters' })
   }
-}
 
-export default async function handler(req: Request): Promise<Response> {
+  const todayUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`
+
+  const pastDate = new Date()
+  pastDate.setDate(pastDate.getDate() - parseInt(days))
+  const dateStr = pastDate.toLocaleDateString('en-GB').split('/').reverse().join('-') // format: dd-mm-yyyy
+
+  const pastUrlToken = `https://api.coingecko.com/api/v3/coins/${id}/history?date=${dateStr}`
+  const pastUrlBenchmark = `https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${dateStr}`
+
   try {
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get('id');
-    const days = parseInt(searchParams.get('days') || '7', 10);
-    const benchmark = searchParams.get('benchmark');
+    const [todayResp, pastTokenResp, pastBenchmarkResp] = await Promise.all([
+      fetch(todayUrl),
+      fetch(pastUrlToken),
+      fetch(pastUrlBenchmark),
+    ])
 
-    if (!id || !benchmark || isNaN(days)) {
-      return new Response(JSON.stringify({ error: 'Missing parameters' }), { status: 400 });
+    const todayData = await todayResp.json()
+    const pastTokenData = await pastTokenResp.json()
+    const pastBenchmarkData = await pastBenchmarkResp.json()
+
+    const priceToday = todayData[id]?.usd
+    const priceTodayBenchmark = todayData[benchmark]?.usd
+    const priceThen = pastTokenData?.market_data?.current_price?.usd
+    const priceThenBenchmark = pastBenchmarkData?.market_data?.current_price?.usd
+
+    // 🧪 Log minimal
+    console.log('[RSM DEBUG] priceToday:', priceToday)
+    console.log('[RSM DEBUG] priceThen:', priceThen)
+    console.log('[RSM DEBUG] Raw Token history:', JSON.stringify(pastTokenData).slice(0, 200))
+
+    if (
+      typeof priceToday !== 'number' || typeof priceTodayBenchmark !== 'number' ||
+      typeof priceThen !== 'number' || typeof priceThenBenchmark !== 'number' ||
+      priceToday === 0 || priceTodayBenchmark === 0 || priceThen === 0 || priceThenBenchmark === 0
+    ) {
+      return res.status(400).json({ error: 'Missing or zero price' })
     }
 
-    const now = new Date();
-    const past = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-    const pastDate = past.toLocaleDateString('en-GB').split('/').reverse().join('-'); // dd-mm-yyyy
+    const perfToken = (priceToday - priceThen) / priceThen
+    const perfBenchmark = (priceTodayBenchmark - priceThenBenchmark) / priceThenBenchmark
+    const rs = perfToken / perfBenchmark
 
-    const tokenNow = await fetchPrice(id);
-    const tokenPast = await fetchPrice(id, pastDate);
-
-    const benchNow = await fetchPrice(benchmark);
-    const benchPast = await fetchPrice(benchmark, pastDate);
-
-    if ([tokenNow, tokenPast, benchNow, benchPast].some(p => p === null || p === 0)) {
-      return new Response(JSON.stringify({ error: 'Missing or zero price' }), { status: 500 });
-    }
-
-    const tokenPerf = (tokenNow! - tokenPast!) / tokenPast!;
-    const benchPerf = (benchNow! - benchPast!) / benchPast!;
-
-    const relativeStrength = tokenPerf / benchPerf;
-
-    return new Response(JSON.stringify({ relativeStrength }), {
-      headers: { 'Content-Type': 'application/json' },
-    });
-  } catch (err: any) {
-    return new Response(JSON.stringify({ error: 'Unexpected server error', details: err.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    res.status(200).json({ rs })
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error', detail: (error as Error).message })
   }
 }
