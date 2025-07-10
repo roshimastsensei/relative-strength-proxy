@@ -1,56 +1,64 @@
-import type { NextApiRequest, NextApiResponse } from 'next'
+import type { VercelRequest, VercelResponse } from 'vercel';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const { id, days, benchmark } = req.query
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const { id, days, benchmark } = req.query;
 
-  if (typeof id !== 'string' || typeof days !== 'string' || typeof benchmark !== 'string') {
-    return res.status(400).json({ error: 'Invalid parameters' })
+  if (!id || !days || !benchmark) {
+    return res.status(400).json({ error: 'Missing parameters' });
   }
 
-  const todayUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`
-
-  const pastDate = new Date()
-  pastDate.setDate(pastDate.getDate() - parseInt(days))
-  const dateStr = pastDate.toLocaleDateString('en-GB').split('/').reverse().join('-') // format: dd-mm-yyyy
-
-  const pastUrlToken = `https://api.coingecko.com/api/v3/coins/${id}/history?date=${dateStr}`
-  const pastUrlBenchmark = `https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${dateStr}`
-
   try {
-    const [todayResp, pastTokenResp, pastBenchmarkResp] = await Promise.all([
-      fetch(todayUrl),
-      fetch(pastUrlToken),
-      fetch(pastUrlBenchmark),
-    ])
+    // 1. Prix actuels (P_t)
+    const urlPriceNow = `https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`;
+    const responseNow = await fetch(urlPriceNow);
+    const pricesNow = await responseNow.json();
 
-    const todayData = await todayResp.json()
-    const pastTokenData = await pastTokenResp.json()
-    const pastBenchmarkData = await pastBenchmarkResp.json()
+    const priceToday = pricesNow?.[id as string]?.usd;
+    const benchmarkToday = pricesNow?.[benchmark as string]?.usd;
 
-    const priceToday = todayData[id]?.usd
-    const priceTodayBenchmark = todayData[benchmark]?.usd
-    const priceThen = pastTokenData?.market_data?.current_price?.usd
-    const priceThenBenchmark = pastBenchmarkData?.market_data?.current_price?.usd
+    // DEBUG
+    console.log(`[RSM DEBUG] priceToday: ${priceToday}`);
+    console.log(`[RSM DEBUG] benchmarkToday: ${benchmarkToday}`);
 
-    // 🧪 Log minimal
-    console.log('[RSM DEBUG] priceToday:', priceToday)
-    console.log('[RSM DEBUG] priceThen:', priceThen)
-    console.log('[RSM DEBUG] Raw Token history:', JSON.stringify(pastTokenData).slice(0, 200))
+    // 2. Prix d'il y a n jours (P_t-n)
+    const pastDate = new Date(Date.now() - Number(days) * 86400000);
+    const [day, month, year] = pastDate.toLocaleDateString('en-GB').split('/');
+    const finalDate = `${day}-${month}-${year}`; // Format dd-mm-yyyy
 
-    if (
-      typeof priceToday !== 'number' || typeof priceTodayBenchmark !== 'number' ||
-      typeof priceThen !== 'number' || typeof priceThenBenchmark !== 'number' ||
-      priceToday === 0 || priceTodayBenchmark === 0 || priceThen === 0 || priceThenBenchmark === 0
-    ) {
-      return res.status(400).json({ error: 'Missing or zero price' })
+    const urlPriceThen = `https://api.coingecko.com/api/v3/coins/${id}/history?date=${finalDate}`;
+    const urlBenchmarkThen = `https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${finalDate}`;
+
+    const responseThen = await fetch(urlPriceThen);
+    const responseBenchThen = await fetch(urlBenchmarkThen);
+
+    const priceDataThen = await responseThen.json();
+    const benchDataThen = await responseBenchThen.json();
+
+    // DEBUG
+    console.log('[RSM DEBUG] Raw Token history:', JSON.stringify(priceDataThen));
+    console.log('[RSM DEBUG] Raw Benchmark history:', JSON.stringify(benchDataThen));
+
+    const priceThen = priceDataThen?.market_data?.current_price?.usd;
+    const benchmarkThen = benchDataThen?.market_data?.current_price?.usd;
+
+    // DEBUG
+    console.log(`[RSM DEBUG] priceThen: ${priceThen}`);
+    console.log(`[RSM DEBUG] benchmarkThen: ${benchmarkThen}`);
+
+    if (!priceToday || !benchmarkToday || !priceThen || !benchmarkThen) {
+      return res.status(400).json({ error: 'Missing or zero price' });
     }
 
-    const perfToken = (priceToday - priceThen) / priceThen
-    const perfBenchmark = (priceTodayBenchmark - priceThenBenchmark) / priceThenBenchmark
-    const rs = perfToken / perfBenchmark
+    // 3. Performances
+    const perfToken = (priceToday - priceThen) / priceThen;
+    const perfBenchmark = (benchmarkToday - benchmarkThen) / benchmarkThen;
 
-    res.status(200).json({ rs })
-  } catch (error) {
-    res.status(500).json({ error: 'Internal server error', detail: (error as Error).message })
+    // 4. Relative Strength
+    const rs = perfToken / perfBenchmark;
+
+    return res.status(200).json({ rs });
+  } catch (err) {
+    console.error('[RSM ERROR]', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 }
