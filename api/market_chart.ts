@@ -1,62 +1,86 @@
-// pages/api/market_chart.ts
+import type { VercelRequest, VercelResponse } from 'vercel';
+import axios from 'axios';
+import dayjs from 'dayjs';
 
-import type { NextApiRequest, NextApiResponse } from 'next'
-import axios from 'axios'
-
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const { id, days, benchmark } = req.query
+    const { id, days, benchmark } = req.query;
 
-    if (!id || !days || !benchmark || typeof id !== 'string' || typeof days !== 'string' || typeof benchmark !== 'string') {
-      return res.status(400).json({ error: 'Invalid parameters' })
+    if (typeof id !== 'string' || typeof days !== 'string' || typeof benchmark !== 'string') {
+      return res.status(400).json({ error: 'Missing or invalid parameters' });
     }
 
-    const now = new Date()
-    const dateObj = new Date(now.getTime() - parseInt(days) * 86400000)
-    const dateThen = `${dateObj.getDate().toString().padStart(2, '0')}-${(dateObj.getMonth() + 1).toString().padStart(2, '0')}-${dateObj.getFullYear()}`
-
-    // Price today (token + benchmark)
-    const priceTodayResponse = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-      params: {
-        ids: `${id},${benchmark}`,
-        vs_currencies: 'usd'
-      }
-    })
-
-    const priceToday = priceTodayResponse.data?.[id]?.usd
-    const benchmarkToday = priceTodayResponse.data?.[benchmark]?.usd
-
-    console.log('[RSM DEBUG] priceToday:', priceToday)
-    console.log('[RSM DEBUG] benchmarkToday:', benchmarkToday)
-
-    if (!priceToday || !benchmarkToday) {
-      return res.status(400).json({ error: 'Missing or zero price' })
+    const daysInt = parseInt(days);
+    if (isNaN(daysInt)) {
+      return res.status(400).json({ error: 'Days must be an integer' });
     }
 
-    // Price then (token + benchmark)
-    const [tokenThenRes, benchThenRes] = await Promise.all([
-      axios.get(`https://api.coingecko.com/api/v3/coins/${id}/history?date=${dateThen}`),
-      axios.get(`https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${dateThen}`)
-    ])
+    const now = dayjs();
+    const pastDate = now.subtract(daysInt, 'day');
+    const pastDateFormatted = pastDate.format('DD-MM-YYYY');
 
-    const priceThen = tokenThenRes.data?.market_data?.current_price?.usd
-    const benchmarkThen = benchThenRes.data?.market_data?.current_price?.usd
+    // 🟩 LOG: paramètres reçus
+    console.log(`🟢 Fetching RS for ID=${id}, Benchmark=${benchmark}, Days=${daysInt}`);
+    console.log(`🕒 Date utilisée pour l’historique : ${pastDateFormatted}`);
 
-    console.log('[RSM DEBUG] priceThen:', priceThen)
-    console.log('[RSM DEBUG] benchmarkThen:', benchmarkThen)
+    // Obtenir prix actuel
+    const currentPriceUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`;
+    const currentResp = await axios.get(currentPriceUrl);
+    const currentData = currentResp.data;
 
-    if (!priceThen || !benchmarkThen) {
-      return res.status(400).json({ error: 'Missing or zero historical price' })
+    const ptToken = currentData[id]?.usd;
+    const ptBenchmark = currentData[benchmark]?.usd;
+
+    // LOG prix actuels
+    console.log(`📈 Prix actuels : ${id} = ${ptToken}, ${benchmark} = ${ptBenchmark}`);
+
+    // Obtenir prix historiques
+    const historyUrlToken = `https://api.coingecko.com/api/v3/coins/${id}/history?date=${pastDateFormatted}`;
+    const historyUrlBenchmark = `https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${pastDateFormatted}`;
+
+    const [historyTokenResp, historyBenchmarkResp] = await Promise.all([
+      axios.get(historyUrlToken),
+      axios.get(historyUrlBenchmark)
+    ]);
+
+    const ptMinusN_Token = historyTokenResp.data.market_data?.current_price?.usd;
+    const ptMinusN_Benchmark = historyBenchmarkResp.data.market_data?.current_price?.usd;
+
+    // LOG prix historiques
+    console.log(`📉 Prix historiques au ${pastDateFormatted} :`);
+    console.log(`   ${id} = ${ptMinusN_Token}`);
+    console.log(`   ${benchmark} = ${ptMinusN_Benchmark}`);
+
+    // Vérifications
+    if (!ptToken || !ptBenchmark || !ptMinusN_Token || !ptMinusN_Benchmark) {
+      console.log('❌ Prix manquants ou nuls. Abandon de traitement.');
+      return res.status(400).json({
+        error: 'Missing or zero price',
+        id,
+        benchmark,
+        ptToken,
+        ptBenchmark,
+        ptMinusN_Token,
+        ptMinusN_Benchmark
+      });
     }
 
-    // Compute RS
-    const perfToken = (priceToday - priceThen) / priceThen
-    const perfBenchmark = (benchmarkToday - benchmarkThen) / benchmarkThen
-    const rs = perfToken / perfBenchmark
+    // Calcul performance
+    const perfToken = (ptToken - ptMinusN_Token) / ptMinusN_Token;
+    const perfBenchmark = (ptBenchmark - ptMinusN_Benchmark) / ptMinusN_Benchmark;
 
-    return res.status(200).json({ rs })
-  } catch (error) {
-    console.error('[RSM ERROR]', error)
-    return res.status(500).json({ error: 'Internal server error' })
+    if (perfBenchmark === 0) {
+      return res.status(400).json({ error: 'Benchmark performance is zero' });
+    }
+
+    const rs = perfToken / perfBenchmark;
+    console.log(`✅ RS calculée pour ${id} vs ${benchmark} = ${rs}`);
+
+    return res.status(200).json({ rs });
+
+  } catch (error: any) {
+    console.error('🔥 Erreur inattendue :', error.message || error);
+    return res.status(500).json({ error: 'Internal server error', message: error.message || error });
   }
 }
+
