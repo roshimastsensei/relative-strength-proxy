@@ -1,86 +1,53 @@
-import type { VercelRequest, VercelResponse } from 'vercel';
 import axios from 'axios';
-import dayjs from 'dayjs';
+import { format, subDays } from 'date-fns';
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req, res) {
+  const { id, days, benchmark } = req.query;
+
+  if (!id || !days || !benchmark) {
+    return res.status(400).json({ error: 'Missing required parameters (id, days, benchmark)' });
+  }
+
   try {
-    const { id, days, benchmark } = req.query;
+    const today = new Date();
+    const pastDate = subDays(today, parseInt(days));
+    const formattedDate = format(pastDate, 'dd-MM-yyyy');
 
-    if (typeof id !== 'string' || typeof days !== 'string' || typeof benchmark !== 'string') {
-      return res.status(400).json({ error: 'Missing or invalid parameters' });
-    }
+    // Fetch current prices (P_t)
+    const priceNowUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`;
+    const priceNowResp = await axios.get(priceNowUrl);
+    const priceNow = priceNowResp.data;
 
-    const daysInt = parseInt(days);
-    if (isNaN(daysInt)) {
-      return res.status(400).json({ error: 'Days must be an integer' });
-    }
+    const pt_token = priceNow[id]?.usd ?? 0;
+    const pt_benchmark = priceNow[benchmark]?.usd ?? 0;
 
-    const now = dayjs();
-    const pastDate = now.subtract(daysInt, 'day');
-    const pastDateFormatted = pastDate.format('DD-MM-YYYY');
+    // Fetch historical price (P_{t-n}) for token
+    const histTokenUrl = `https://api.coingecko.com/api/v3/coins/${id}/history?date=${formattedDate}`;
+    const histBenchmarkUrl = `https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${formattedDate}`;
 
-    // 🟩 LOG: paramètres reçus
-    console.log(`🟢 Fetching RS for ID=${id}, Benchmark=${benchmark}, Days=${daysInt}`);
-    console.log(`🕒 Date utilisée pour l’historique : ${pastDateFormatted}`);
-
-    // Obtenir prix actuel
-    const currentPriceUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${id},${benchmark}&vs_currencies=usd`;
-    const currentResp = await axios.get(currentPriceUrl);
-    const currentData = currentResp.data;
-
-    const ptToken = currentData[id]?.usd;
-    const ptBenchmark = currentData[benchmark]?.usd;
-
-    // LOG prix actuels
-    console.log(`📈 Prix actuels : ${id} = ${ptToken}, ${benchmark} = ${ptBenchmark}`);
-
-    // Obtenir prix historiques
-    const historyUrlToken = `https://api.coingecko.com/api/v3/coins/${id}/history?date=${pastDateFormatted}`;
-    const historyUrlBenchmark = `https://api.coingecko.com/api/v3/coins/${benchmark}/history?date=${pastDateFormatted}`;
-
-    const [historyTokenResp, historyBenchmarkResp] = await Promise.all([
-      axios.get(historyUrlToken),
-      axios.get(historyUrlBenchmark)
+    const [histTokenResp, histBenchmarkResp] = await Promise.all([
+      axios.get(histTokenUrl),
+      axios.get(histBenchmarkUrl)
     ]);
 
-    const ptMinusN_Token = historyTokenResp.data.market_data?.current_price?.usd;
-    const ptMinusN_Benchmark = historyBenchmarkResp.data.market_data?.current_price?.usd;
+    const ptn_token = histTokenResp.data?.market_data?.current_price?.usd ?? 0;
+    const ptn_benchmark = histBenchmarkResp.data?.market_data?.current_price?.usd ?? 0;
 
-    // LOG prix historiques
-    console.log(`📉 Prix historiques au ${pastDateFormatted} :`);
-    console.log(`   ${id} = ${ptMinusN_Token}`);
-    console.log(`   ${benchmark} = ${ptMinusN_Benchmark}`);
-
-    // Vérifications
-    if (!ptToken || !ptBenchmark || !ptMinusN_Token || !ptMinusN_Benchmark) {
-      console.log('❌ Prix manquants ou nuls. Abandon de traitement.');
-      return res.status(400).json({
-        error: 'Missing or zero price',
-        id,
-        benchmark,
-        ptToken,
-        ptBenchmark,
-        ptMinusN_Token,
-        ptMinusN_Benchmark
-      });
+    if (!pt_token || !ptn_token || !pt_benchmark || !ptn_benchmark) {
+      return res.status(400).json({ error: 'Missing or zero price' });
     }
 
-    // Calcul performance
-    const perfToken = (ptToken - ptMinusN_Token) / ptMinusN_Token;
-    const perfBenchmark = (ptBenchmark - ptMinusN_Benchmark) / ptMinusN_Benchmark;
+    const perf_token = (pt_token - ptn_token) / ptn_token;
+    const perf_benchmark = (pt_benchmark - ptn_benchmark) / ptn_benchmark;
 
-    if (perfBenchmark === 0) {
-      return res.status(400).json({ error: 'Benchmark performance is zero' });
-    }
-
-    const rs = perfToken / perfBenchmark;
-    console.log(`✅ RS calculée pour ${id} vs ${benchmark} = ${rs}`);
+    const rs = perf_benchmark === 0 ? null : perf_token / perf_benchmark;
 
     return res.status(200).json({ rs });
 
-  } catch (error: any) {
-    console.error('🔥 Erreur inattendue :', error.message || error);
-    return res.status(500).json({ error: 'Internal server error', message: error.message || error });
+  } catch (error) {
+    console.error('Server error:', error.message);
+    return res.status(500).json({ error: 'Internal Server Error' });
   }
 }
+
 
